@@ -27,7 +27,7 @@ const int SERVO_MAX      = SERVO_CENTER + SERVO_MAX_DEG;  // 120°
 const unsigned long SERVO_IMU_INTERVAL_MS = 20;   // Update servo & IMU @ 50 Hz
 unsigned long lastServoImuUpdate = 0;
 
-//PI control globals
+//PI control globals -----------------------------------
 volatile int pos_i = 0;  //stores the # of counts read by the encoder
 volatile float velocity_i = 0;
 volatile long prevT_i = 0;
@@ -38,6 +38,14 @@ float v1Filt = 0, v1Prev = 0;
 float v2Filt = 0, v2Prev = 0;
 float eintegral = 0;
 
+//????????????????
+//Peak motor speed during each tail stroke (RPM).
+// Stay below no-load speed (350 RPM). Recommended range: 100–250.
+const float SWIM_SPEED_RPM = 200.0f; //180.0F
+// Duration of each half-stroke in microseconds.
+// 1,000,000 µs = 1 second ON, then 1 second OFF (≈ 0.5 Hz tail beat).
+// Lower value = faster tail beat. Try 500,000 for a quicker stroke.
+const float STROKE_PERIOD_US = 1.0e6f; //7.0e5f
 
 void setup() {
   Serial.begin(115200);
@@ -76,29 +84,30 @@ void loop() {
 
   //----DC MOTOR — velocity method 1 (position delta / deltaT)----
   long currT = micros();                            //measure the time elapsed using the micros function
-  float deltaT = ((float)(currT - prevT)) / 1.0e6;  //delta = time elapsed - the last time measurment
+  float deltaT = ((float)(currT - prevT)) / 1.0e6f;  //delta = time elapsed - the last time measurment
   float velocity1 = (pos - posPrev) / deltaT;       //difference of current - previous encoder count / deltaT
   posPrev = pos;
   prevT = currT;
 
   //Convert count/s to RPM: PPR x 4 (quadrature)
-  // 150 PPR encoder → 150 × 4 = 600. Ours is 48 PPR → use 192.
-  float v1 = velocity1 / 44 * 60.0;
-  float v2 = velocity2 / 44 * 60.0;
+  // 150 PPR encoder → 150 × 4 = 600. Ours is 11 PPR x 32(ratio) x 4→ use 192.
+  float v1 = velocity1 / 1496.0f * 60.0f;
+  float v2 = velocity2 / 1496.0f * 60.0f;
 
   // low-pass filter (25 Hz cutoff)
-  v1Filt = 0.854 * v1Filt + 0.0728 * v1 + 0.0728 * v1Prev;
+  v1Filt = 0.854f * v1Filt + 0.0728f * v1 + 0.0728f * v1Prev;
   v1Prev = v1;
-  v2Filt = 0.854 * v2Filt + 0.0728 * v2 + 0.0728 * v2Prev;
+  v2Filt = 0.854f * v2Filt + 0.0728f * v2 + 0.0728f * v2Prev;
   v2Prev = v2;
 
   //------PI SPEED CONTROL----------
-  //Set a target speed
-  float vt = 100 * (sin(currT / 1e6) > 0);
+  //Set a target speed ?????
+  float vt = SWIM_SPEED_RPM * (sin(currT / STROKE_PERIOD_US) > 0);
 
   // Compute the control signal u
-  float kp = 1.0f; //Tune: proportional gain
-  float ki = 0.5f; //Tune: Integral gain
+  float kp = 1.0f; // 0 0.5 1.0 2.0
+  float ki = 0.5f; // 0 ------------> 0.1 0.3 1.0
+  //(1.5f, 0.3f)
 
   float e = vt - v1Filt;
   eintegral = eintegral + e * deltaT;
