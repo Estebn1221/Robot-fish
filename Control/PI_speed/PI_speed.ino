@@ -1,9 +1,9 @@
 #include <util/atomic.h>
 #include <Servo.h>
-#include <BMI160Gen.h>
+#include <MPU9250.h>
 
 // Pin definitions
-#define ENCA 2 //Encoder channel A — hardware interrupt INT0
+#define ENCA 2  //Encoder channel A — hardware interrupt INT0
 #define ENCB 3
 
 // PWM capable pins
@@ -11,20 +11,21 @@
 #define IN2 6
 
 // Motor driver
-#define SERVO_PIN 9 
+#define SERVO_PIN 9
 
 // Accelerator - 0 = X,  1 = Y,  2 = Z ????
-#define INCLINATION_AXIS  1
-const float ACCEL_OFFSET = 0.0f; //calibration
+MPU9250 mpu;
+#define INCLINATION_AXIS 1
+const float ACCEL_OFFSET = 0.0f;  // re-calibrate with MPU-9250
 
 //Servo constraints ?????
-const int SERVO_CENTER   = 90;   // Straight-ahead position (degrees)
-const int SERVO_MAX_DEG  = 30;   // Maximum deflection either side
-const int SERVO_MIN      = SERVO_CENTER - SERVO_MAX_DEG;  // 60°
-const int SERVO_MAX      = SERVO_CENTER + SERVO_MAX_DEG;  // 120°
+const int SERVO_CENTER = 90;                         // Straight-ahead position (degrees)
+const int SERVO_MAX_DEG = 30;                        // Maximum deflection either side
+const int SERVO_MIN = SERVO_CENTER - SERVO_MAX_DEG;  // 60°
+const int SERVO_MAX = SERVO_CENTER + SERVO_MAX_DEG;  // 120°
 
 // TIMING — non-blocking millis() intervals
-const unsigned long SERVO_IMU_INTERVAL_MS = 20;   // Update servo & IMU @ 50 Hz
+const unsigned long SERVO_IMU_INTERVAL_MS = 20;  // Update servo & IMU @ 50 Hz
 unsigned long lastServoImuUpdate = 0;
 
 //PI control globals -----------------------------------
@@ -41,11 +42,11 @@ float eintegral = 0;
 //????????????????
 //Peak motor speed during each tail stroke (RPM).
 // Stay below no-load speed (350 RPM). Recommended range: 100–250.
-const float SWIM_SPEED_RPM = 200.0f; //180.0F
+const float SWIM_SPEED_RPM = 200.0f;  //180.0F
 // Duration of each half-stroke in microseconds.
 // 1,000,000 µs = 1 second ON, then 1 second OFF (≈ 0.5 Hz tail beat).
 // Lower value = faster tail beat. Try 500,000 for a quicker stroke.
-const float STROKE_PERIOD_US = 1.0e6f; //7.0e5f
+const float STROKE_PERIOD_US = 1.0e6f;  //7.0e5f
 
 void setup() {
   Serial.begin(115200);
@@ -56,21 +57,23 @@ void setup() {
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   attachInterrupt(digitalPinToInterrupt(ENCA), readEncoder, RISING);  //each time the interrupt is triggered it will call the readEncoder func
-  
-  // Servo 
+
+  // Servo
   headServo.attach(SERVO_PIN);
-  headServo.write(SERVO_CENTER);  
+  headServo.write(SERVO_CENTER);
 
   // --- BMI160 IMU (I2C) ---
-  // ????Default I2C address is 0x69; use 0x68 if SDO pin is pulled LOW.
-  if (!BMI160.begin(BMI160GenClass::I2C_MODE)) {
-    Serial.println("BMI160 init failed! Check wiring (SDA→A4, SCL→A5).");
-    while (1);  // Halt — IMU is required
+  Wire.begin();
+  if (!mpu.setup(0x68)) {  // ???0x68 is default I2C address; try 0x69 if it fails
+    Serial.println("ERROR: MPU-9250 not found! Check wiring (SDA→A4, SCL→A5).");
+    while (1)
+      ;
   }
-  // Set accelerometer range to ±2g for best resolution at small tilt angles.
-  // Options: 2, 4, 8, 16 (g). ???Increase if fish experiences strong vibrations.
-  BMI160.setAccelerometerRange(2);
-  Serial.println("BMI160 ready.");
+  // Optional but recommended: calibrate accelerometer on startup.
+  // Keep the fish STILL and LEVEL for ~5 seconds after powering on.
+  Serial.println("Keep sensor still for calibration...");
+  mpu.calibrateAccelGyro();
+  Serial.println("MPU-9250 ready.");
 }
 
 void loop() {
@@ -83,9 +86,9 @@ void loop() {
   }
 
   //----DC MOTOR — velocity method 1 (position delta / deltaT)----
-  long currT = micros();                            //measure the time elapsed using the micros function
+  long currT = micros();                             //measure the time elapsed using the micros function
   float deltaT = ((float)(currT - prevT)) / 1.0e6f;  //delta = time elapsed - the last time measurment
-  float velocity1 = (pos - posPrev) / deltaT;       //difference of current - previous encoder count / deltaT
+  float velocity1 = (pos - posPrev) / deltaT;        //difference of current - previous encoder count / deltaT
   posPrev = pos;
   prevT = currT;
 
@@ -105,13 +108,13 @@ void loop() {
   float vt = SWIM_SPEED_RPM * (sin(currT / STROKE_PERIOD_US) > 0);
 
   // Compute the control signal u
-  float kp = 1.0f; // 0 0.5 1.0 2.0
-  float ki = 0.5f; // 0 ------------> 0.1 0.3 1.0
+  float kp = 1.0f;  // 0 0.5 1.0 2.0
+  float ki = 0.5f;  // 0 ------------> 0.1 0.3 1.0
   //(1.5f, 0.3f)
 
   float e = vt - v1Filt;
   eintegral = eintegral + e * deltaT;
-  eintegral = constrain(eintegral, -200.0f, 200.0f); //anti-windup (claude's recomendation)
+  eintegral = constrain(eintegral, -200.0f, 200.0f);  //anti-windup (claude's recomendation)
   float u = kp * e + ki * eintegral;
 
   // Set the motor speed and direction
@@ -140,28 +143,22 @@ void loop() {
   delay(1);
 }
 
-void updateHeadServo() { // Reads IMU, computes inclination on the configured axis, maps it to the
-//  servo's constrained 60°–120° range
-// --- Read raw accelerometer data (all three axes in one call) ---
-  int axRaw, ayRaw, azRaw;
-  BMI160.readAccelerometer(axRaw, ayRaw, azRaw);
-
-  // --- Select the axis that represents left/right tilt (roll) ---
-  // This is controlled by INCLINATION_AXIS at the top of the file.
-  float axisRaw;
+void updateHeadServo() {  // Reads IMU, computes inclination on the configured axis, maps it to the
+                          //  servo's constrained 60°–120° range
+                          // --- Read raw accelerometer data (all three axes in one call) ---
+  mpu.update();           
+  // MPU9250 library returns acceleration already in g-force (no raw counts).
+  // Select axis based on physical mounting — same INCLINATION_AXIS flag as before.
+  float accel_g_raw;
   switch (INCLINATION_AXIS) {
-    case 0:  axisRaw = (float)axRaw;  break;  // X axis
-    case 1:  axisRaw = (float)ayRaw;  break;  // Y axis
-    default: axisRaw = (float)azRaw;  break;  // Z axis
+    case 0: accel_g_raw = mpu.getAccX(); break;   // X axis
+    case 1: accel_g_raw = mpu.getAccY(); break;   // Y axis
+    default: accel_g_raw = mpu.getAccZ(); break;  // Z axis
   }
-
-  // --- Apply calibration offset ---
-  // Subtract the resting bias so the fish reads 0 when level.
-  float axisCalibrated = axisRaw - ACCEL_OFFSET;
-
-  // --- Convert raw counts to g-force ---
-  // Clamp to ±1g to avoid asin() domain errors from noise.
-  float accel_g = constrain(axisCalibrated / 16384.0f, -1.0f, 1.0f);
+  // Apply calibration offset (in g units now, not raw counts).
+  // At rest on a flat surface the value should be ~0.0g on X or Y axes.
+  // If not, measure the resting value and enter it in ACCEL_OFFSET.
+  float accel_g = constrain(accel_g_raw - ACCEL_OFFSET, -1.0f, 1.0f);
 
   // --- Calculate tilt angle in degrees using arcsin ---
   // Result range: -90° (full tilt one way) to +90° (full tilt other way).
@@ -176,14 +173,14 @@ void updateHeadServo() { // Reads IMU, computes inclination on the configured ax
   //  tiltDeg  +30° → servoAngle 120°  (full right)
   //
   // map() uses integer math; we cast and constrain for safety.
-  float tiltClamped  = constrain(tiltDeg, -(float)SERVO_MAX_DEG, (float)SERVO_MAX_DEG);
-  int   servoAngle   = (int)map(
-                          (long)(tiltClamped * 100),          // scale up for integer map
-                          (long)(-SERVO_MAX_DEG * 100),       // input min
-                          (long)( SERVO_MAX_DEG * 100),       // input max
-                          SERVO_MIN,                           // output min  = 60°
-                          SERVO_MAX                            // output max  = 120°
-                       );
+  float tiltClamped = constrain(tiltDeg, -(float)SERVO_MAX_DEG, (float)SERVO_MAX_DEG);
+  int servoAngle = (int)map(
+    (long)(tiltClamped * 100),     // scale up for integer map
+    (long)(-SERVO_MAX_DEG * 100),  // input min
+    (long)(SERVO_MAX_DEG * 100),   // input max
+    SERVO_MIN,                     // output min  = 60°
+    SERVO_MAX                      // output max  = 120°
+  );
 
   // Final safety clamp — belt and suspenders
   servoAngle = constrain(servoAngle, SERVO_MIN, SERVO_MAX);
@@ -199,24 +196,24 @@ void setMotor(int dir, int pwmVal, int in1, int in2) {
     digitalWrite(in1, LOW);
     analogWrite(in2, pwmVal);  // DRV8871: dir = -1 → reverse  (IN1 = LOW, IN2 = PWM)
     else {
-    digitalWrite(in1, LOW);  // stop  (IN1 = LOW, IN2 = LOW)
-    digitalWrite(in2, LOW);
+      digitalWrite(in1, LOW);  // stop  (IN1 = LOW, IN2 = LOW)
+      digitalWrite(in2, LOW);
+    }
   }
-}
 
-void readEncoder() {
-  int b = digitalRead(ENCB);
-  int increment = 0;
-  if (b > 0) {
-    increment = 1;
-  } else {
-    increment = -1;
+  void readEncoder() {
+    int b = digitalRead(ENCB);
+    int increment = 0;
+    if (b > 0) {
+      increment = 1;
+    } else {
+      increment = -1;
+    }
+    pos_i = pos_i + increment;
+
+    //compute velocity with method 2
+    long currT = micros();                              //measure the current time
+    float deltaT = ((float)(currT - prevT_i)) / 1.0e6;  //deltaT = currT - prevT
+    velocity_i = increment / deltaT;                    //speed = +- 1 / deltaT
+    prevT_i = currT;
   }
-  pos_i = pos_i + increment;
-
-  //compute velocity with method 2
-  long currT = micros();                              //measure the current time
-  float deltaT = ((float)(currT - prevT_i)) / 1.0e6;  //deltaT = currT - prevT
-  velocity_i = increment / deltaT;                    //speed = +- 1 / deltaT
-  prevT_i = currT;
-}
