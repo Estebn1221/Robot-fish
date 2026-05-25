@@ -1,9 +1,10 @@
 #include <util/atomic.h>
 #include <Servo.h>
-#include <BMI160Gen.h>
+#include <MPU9250_asukiaaa.h>
+
 
 // Pin definitions
-#define ENCA 2 //Encoder channel A — hardware interrupt INT0
+#define ENCA 2  //Encoder channel A — hardware interrupt INT0
 #define ENCB 3
 
 // PWM capable pins
@@ -11,23 +12,34 @@
 #define IN2 6
 
 // Motor driver
-#define SERVO_PIN 9 
+#define SERVO_PIN 9
+Servo headServo;
 
 // Accelerator - 0 = X,  1 = Y,  2 = Z ????
-#define INCLINATION_AXIS  1
-const float ACCEL_OFFSET = 0.0f; //calibration
+MPU9250_asukiaaa sensor;
 
 //Servo constraints ?????
-const int SERVO_CENTER   = 90;   // Straight-ahead position (degrees)
-const int SERVO_MAX_DEG  = 30;   // Maximum deflection either side
-const int SERVO_MIN      = SERVO_CENTER - SERVO_MAX_DEG;  // 60°
-const int SERVO_MAX      = SERVO_CENTER + SERVO_MAX_DEG;  // 120°
+const int SERVO_CENTER = 72;  // Straight-ahead position (degrees)
+const int SERVO_MIN = 56;
+const int SERVO_MAX = 86;
+float anguloZ = 0.0;
+float anguloInicial = 0.0;
+bool primeraLectura = true;
+unsigned long tiempoAnterior = 0;
+
+// --- Calibración ---
+float gyroZ_offset = 0.0;
+const int NUM_MUESTRAS_CAL = 500;
+// Gyroscope angle
+const int GYRO_MIN = -90;  // Ángulo del giroscopio que mapea al mínimo
+const int GYRO_MAX = 90;   // Ángulo del giroscopio que mapea al máximo
+
 
 // TIMING — non-blocking millis() intervals
-const unsigned long SERVO_IMU_INTERVAL_MS = 20;   // Update servo & IMU @ 50 Hz
+const unsigned long SERVO_IMU_INTERVAL_MS = 20;  // Update servo & IMU @ 50 Hz
 unsigned long lastServoImuUpdate = 0;
 
-//PI control globals
+//PI control globals -----------------------------------
 volatile int pos_i = 0;  //stores the # of counts read by the encoder
 volatile float velocity_i = 0;
 volatile long prevT_i = 0;
@@ -38,6 +50,14 @@ float v1Filt = 0, v1Prev = 0;
 float v2Filt = 0, v2Prev = 0;
 float eintegral = 0;
 
+//????????????????
+//Peak motor speed during each tail stroke (RPM).
+// Stay below no-load speed (350 RPM). Recommended range: 100–250.
+const float SWIM_SPEED_RPM = 120.0f;  //180.0F
+// Duration of each half-stroke in microseconds.
+// 1,000,000 µs = 1 second ON, then 1 second OFF (≈ 0.5 Hz tail beat).
+// Lower value = faster tail beat. Try 500,000 for a quicker stroke.
+const float STROKE_PERIOD_US = 7.0e5f ;  //7.0e5f    1.0e6f
 
 void setup() {
   Serial.begin(115200);
@@ -48,21 +68,28 @@ void setup() {
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   attachInterrupt(digitalPinToInterrupt(ENCA), readEncoder, RISING);  //each time the interrupt is triggered it will call the readEncoder func
-  
-  // Servo 
+
+  // Servo
   headServo.attach(SERVO_PIN);
-  headServo.write(SERVO_CENTER);  
+  headServo.write(SERVO_CENTER);
 
   // --- BMI160 IMU (I2C) ---
-  // ????Default I2C address is 0x69; use 0x68 if SDO pin is pulled LOW.
-  if (!BMI160.begin(BMI160GenClass::I2C_MODE)) {
-    Serial.println("BMI160 init failed! Check wiring (SDA→A4, SCL→A5).");
-    while (1);  // Halt — IMU is required
-  }
-  // Set accelerometer range to ±2g for best resolution at small tilt angles.
-  // Options: 2, 4, 8, 16 (g). ???Increase if fish experiences strong vibrations.
-  BMI160.setAccelerometerRange(2);
-  Serial.println("BMI160 ready.");
+  // Wire.begin();
+  // if (!mpu.setup(0x68)) {  // ???0x68 is default I2C address; try 0x69 if it fails
+  //   Serial.println("ERROR: MPU-9250 not found! Check wiring (SDA→A4, SCL→A5).");
+  //   while (1)
+  //     ;
+  // }
+  Wire.begin();
+  sensor.setWire(&Wire);
+  sensor.beginGyro();
+  sensor.beginAccel();
+  delay(100);
+  calibrarGiroscopio();  // your calibration function
+  tiempoAnterior = millis();
+  // Optional but recommended: calibrate accelerometer on startup.
+  // Keep the fish STILL and LEVEL for ~5 seconds after powering on.
+  Serial.println("Keep sensor still for calibration...");
 }
 
 void loop() {
@@ -75,40 +102,41 @@ void loop() {
   }
 
   //----DC MOTOR — velocity method 1 (position delta / deltaT)----
-  long currT = micros();                            //measure the time elapsed using the micros function
-  float deltaT = ((float)(currT - prevT)) / 1.0e6;  //delta = time elapsed - the last time measurment
-  float velocity1 = (pos - posPrev) / deltaT;       //difference of current - previous encoder count / deltaT
+  long currT = micros();                             //measure the time elapsed using the micros function
+  float deltaT = ((float)(currT - prevT)) / 1.0e6f;  //delta = time elapsed - the last time measurment
+  float velocity1 = (pos - posPrev) / deltaT;        //difference of current - previous encoder count / deltaT
   posPrev = pos;
   prevT = currT;
 
   //Convert count/s to RPM: PPR x 4 (quadrature)
-  // 150 PPR encoder → 150 × 4 = 600. Ours is 48 PPR → use 192.
-  float v1 = velocity1 / 44 * 60.0;
-  float v2 = velocity2 / 44 * 60.0;
+  // 150 PPR encoder → 150 × 4 = 600. Ours is 11 PPR x 34(ratio) x 4→ use 1496.
+  float v1 = velocity1 / 1496.0f * 60.0f;
+  float v2 = velocity2 / 1496.0f * 60.0f;
 
   // low-pass filter (25 Hz cutoff)
-  v1Filt = 0.854 * v1Filt + 0.0728 * v1 + 0.0728 * v1Prev;
+  v1Filt = 0.854f * v1Filt + 0.0728f * v1 + 0.0728f * v1Prev;
   v1Prev = v1;
-  v2Filt = 0.854 * v2Filt + 0.0728 * v2 + 0.0728 * v2Prev;
+  v2Filt = 0.854f * v2Filt + 0.0728f * v2 + 0.0728f * v2Prev;
   v2Prev = v2;
 
   //------PI SPEED CONTROL----------
-  //Set a target speed
-  float vt = 100 * (sin(currT / 1e6) > 0);
+  //Set a target speed ?????
+  float vt = SWIM_SPEED_RPM * (sin(currT / STROKE_PERIOD_US) > 0);
 
   // Compute the control signal u
-  float kp = 1.0f; //Tune: proportional gain
-  float ki = 0.5f; //Tune: Integral gain
+  float kp = 1.0f;  // 0 0.5 1.0 2.0
+  float ki = 0.5f;  // 0 ------------> 0.1 0.3 1.0
+  //(1.5f, 0.3f)
 
   float e = vt - v1Filt;
   eintegral = eintegral + e * deltaT;
-  eintegral = constrain(eintegral, -200.0f, 200.0f); //anti-windup (claude's recomendation)
+  eintegral = constrain(eintegral, -200.0f, 200.0f);  //anti-windup (claude's recomendation)
   float u = kp * e + ki * eintegral;
 
   // Set the motor speed and direction
-  int dir = 1;
+  int dir = -1;
   if (u < 0) {
-    dir = -1;
+    dir = 1;
   }
   int pwr = (int)fabs(u);
   if (pwr > 255) {
@@ -124,61 +152,55 @@ void loop() {
   }
 
   //----Serial printing
-  Serial.print(v1);
-  Serial.println(" ");
+  Serial.print("RPM:");
   Serial.print(v1Filt);
-  Serial.println();
-  delay(1);
+  Serial.print(",");
+  Serial.print("Target:");
+  Serial.println(vt);
 }
 
-void updateHeadServo() { // Reads IMU, computes inclination on the configured axis, maps it to the
-//  servo's constrained 60°–120° range
-// --- Read raw accelerometer data (all three axes in one call) ---
-  int axRaw, ayRaw, azRaw;
-  BMI160.readAccelerometer(axRaw, ayRaw, azRaw);
+void updateHeadServo() {
+  sensor.gyroUpdate();
+  sensor.accelUpdate();
 
-  // --- Select the axis that represents left/right tilt (roll) ---
-  // This is controlled by INCLINATION_AXIS at the top of the file.
-  float axisRaw;
-  switch (INCLINATION_AXIS) {
-    case 0:  axisRaw = (float)axRaw;  break;  // X axis
-    case 1:  axisRaw = (float)ayRaw;  break;  // Y axis
-    default: axisRaw = (float)azRaw;  break;  // Z axis
+  unsigned long ahora = millis();
+  float dt = (ahora - tiempoAnterior) / 1000.0f;
+  tiempoAnterior = ahora;
+
+  // --- ITERATION 1: gyroZ + atan2(ay, ax) ---
+  float gz = sensor.gyroZ() - gyroZ_offset;
+  float ax = sensor.accelX();
+  float ay = sensor.accelY();
+  float anguloAcel = atan2(ay, ax) * 180.0f / PI;
+
+  // --- ITERATION 2: gyroX + atan2(az, ay) ---
+  // float gz = sensor.gyroX() - gyroZ_offset;
+  // float ax = sensor.accelY();
+  // float ay = sensor.accelZ();
+  // float anguloAcel = atan2(ay, ax) * 180.0f / PI;
+
+  // --- ITERATION 3: gyroY + atan2(ax, az) ---
+  // float gz = sensor.gyroY() - gyroZ_offset;
+  // float ax = sensor.accelZ();
+  // float ay = sensor.accelX();
+  // float anguloAcel = atan2(ay, ax) * 180.0f / PI;
+
+  float alpha = 0.75f;
+  anguloZ = alpha * (anguloZ + gz * dt) + (1.0f - alpha) * anguloAcel;
+
+  if (primeraLectura) {
+    anguloInicial = anguloZ;
+    primeraLectura = false;
   }
 
-  // --- Apply calibration offset ---
-  // Subtract the resting bias so the fish reads 0 when level.
-  float axisCalibrated = axisRaw - ACCEL_OFFSET;
+  float anguloRelativo = anguloZ - anguloInicial;
+  if (anguloRelativo > 180.0f) anguloRelativo -= 360.0f;
+  if (anguloRelativo < -180.0f) anguloRelativo += 360.0f;
 
-  // --- Convert raw counts to g-force ---
-  // Clamp to ±1g to avoid asin() domain errors from noise.
-  float accel_g = constrain(axisCalibrated / 16384.0f, -1.0f, 1.0f);
-
-  // --- Calculate tilt angle in degrees using arcsin ---
-  // Result range: -90° (full tilt one way) to +90° (full tilt other way).
-  float tiltDeg = asin(accel_g) * (180.0f / PI);
-
-  // --- Map tilt angle to servo position ---
-  // We only care about ±SERVO_MAX_DEG (±30°) of physical tilt.
-  // Any tilt beyond ±30° saturates the servo at its limit.
-  //
-  //  tiltDeg  -30° → servoAngle  60°  (full left)
-  //  tiltDeg    0° → servoAngle  90°  (center)
-  //  tiltDeg  +30° → servoAngle 120°  (full right)
-  //
-  // map() uses integer math; we cast and constrain for safety.
-  float tiltClamped  = constrain(tiltDeg, -(float)SERVO_MAX_DEG, (float)SERVO_MAX_DEG);
-  int   servoAngle   = (int)map(
-                          (long)(tiltClamped * 100),          // scale up for integer map
-                          (long)(-SERVO_MAX_DEG * 100),       // input min
-                          (long)( SERVO_MAX_DEG * 100),       // input max
-                          SERVO_MIN,                           // output min  = 60°
-                          SERVO_MAX                            // output max  = 120°
-                       );
-
-  // Final safety clamp — belt and suspenders
-  servoAngle = constrain(servoAngle, SERVO_MIN, SERVO_MAX);
-  headServo.write(servoAngle);
+  float anguloConstrained = constrain(anguloRelativo, GYRO_MIN, GYRO_MAX);
+  int posServo = (int)map((long)anguloConstrained, GYRO_MIN, GYRO_MAX, SERVO_MIN, SERVO_MAX);
+  posServo = constrain(posServo, SERVO_MIN, SERVO_MAX);
+  headServo.write(posServo);
 }
 
 
@@ -189,7 +211,7 @@ void setMotor(int dir, int pwmVal, int in1, int in2) {
   } else if (dir == -1) {
     digitalWrite(in1, LOW);
     analogWrite(in2, pwmVal);  // DRV8871: dir = -1 → reverse  (IN1 = LOW, IN2 = PWM)
-    else {
+  } else {
     digitalWrite(in1, LOW);  // stop  (IN1 = LOW, IN2 = LOW)
     digitalWrite(in2, LOW);
   }
@@ -210,4 +232,19 @@ void readEncoder() {
   float deltaT = ((float)(currT - prevT_i)) / 1.0e6;  //deltaT = currT - prevT
   velocity_i = increment / deltaT;                    //speed = +- 1 / deltaT
   prevT_i = currT;
+}
+
+void calibrarGiroscopio() {
+  Serial.println("Calibrando... No muevas el sensor.");
+  float suma = 0;
+  for (int i = 0; i < NUM_MUESTRAS_CAL; i++) {
+    sensor.gyroUpdate();
+    suma += sensor.gyroZ();  // ITERATION 1 ← change to gyroX() or gyroY() to match above
+    // suma += sensor.gyroX(); // ITERATION 2
+    // suma += sensor.gyroY(); // ITERATION 3
+    delay(4);
+  }
+  gyroZ_offset = suma / NUM_MUESTRAS_CAL;
+  Serial.println("Calibracion completa.");
+  delay(500);
 }
