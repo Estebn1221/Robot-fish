@@ -57,7 +57,7 @@ const float SWIM_SPEED_RPM = 120.0f;  //180.0F
 // Duration of each half-stroke in microseconds.
 // 1,000,000 µs = 1 second ON, then 1 second OFF (≈ 0.5 Hz tail beat).
 // Lower value = faster tail beat. Try 500,000 for a quicker stroke.
-const float STROKE_PERIOD_US = 1.0e6f;  //7.0e5f    1.0e6f
+const float STROKE_PERIOD_US = 7.0e5f ;  //7.0e5f    1.0e6f
 
 void setup() {
   Serial.begin(115200);
@@ -134,9 +134,9 @@ void loop() {
   float u = kp * e + ki * eintegral;
 
   // Set the motor speed and direction
-  int dir = 1;
+  int dir = -1;
   if (u < 0) {
-    dir = -1;
+    dir = 1;
   }
   int pwr = (int)fabs(u);
   if (pwr > 255) {
@@ -167,10 +167,23 @@ void updateHeadServo() {
   float dt = (ahora - tiempoAnterior) / 1000.0f;
   tiempoAnterior = ahora;
 
+  // --- ITERATION 1: gyroZ + atan2(ay, ax) ---
   float gz = sensor.gyroZ() - gyroZ_offset;
   float ax = sensor.accelX();
   float ay = sensor.accelY();
   float anguloAcel = atan2(ay, ax) * 180.0f / PI;
+
+  // --- ITERATION 2: gyroX + atan2(az, ay) ---
+  // float gz = sensor.gyroX() - gyroZ_offset;
+  // float ax = sensor.accelY();
+  // float ay = sensor.accelZ();
+  // float anguloAcel = atan2(ay, ax) * 180.0f / PI;
+
+  // --- ITERATION 3: gyroY + atan2(ax, az) ---
+  // float gz = sensor.gyroY() - gyroZ_offset;
+  // float ax = sensor.accelZ();
+  // float ay = sensor.accelX();
+  // float anguloAcel = atan2(ay, ax) * 180.0f / PI;
 
   float alpha = 0.75f;
   anguloZ = alpha * (anguloZ + gz * dt) + (1.0f - alpha) * anguloAcel;
@@ -226,7 +239,9 @@ void calibrarGiroscopio() {
   float suma = 0;
   for (int i = 0; i < NUM_MUESTRAS_CAL; i++) {
     sensor.gyroUpdate();
-    suma += sensor.gyroZ();
+    suma += sensor.gyroZ();  // ITERATION 1 ← change to gyroX() or gyroY() to match above
+    // suma += sensor.gyroX(); // ITERATION 2
+    // suma += sensor.gyroY(); // ITERATION 3
     delay(4);
   }
   gyroZ_offset = suma / NUM_MUESTRAS_CAL;
