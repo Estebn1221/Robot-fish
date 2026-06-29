@@ -1,1 +1,2 @@
-This is the creation and development process of a bioinspired mackerel robot fish, which was developed for the laboratory of Bioinspired Robotics at the Politecnico di Milano, with a team of 5 people composed of Nicolle Antequera, Enea Barilla, Esteban Campo, Dorin Diminulescu, and Daniel Garzon  
+This is the creation and development process of a bioinspired mackerel robot fish, which was developed for the laboratory of Bioinspired Robotics at the Politecnico di Milano, with a team of 5 people composed of Nicolle Antequera, Enea Barilla, Esteban Campo, Dorin Diminulescu, and Daniel Garzon.
+All the information regarding the design is established in this presentation: https://canva.link/kigt8ec0wzh6siy
